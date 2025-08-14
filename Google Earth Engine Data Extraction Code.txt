@@ -1,0 +1,163 @@
+// 加载站点元数据（包含'Station', 'Latitude', 'Longitude', 'Date'列; 'Station'列在本案例代码中由字符"C"和数字构成，例如"C1"）
+var table = ee.FeatureCollection("projects/ee-chavezconstanzaa492/assets/CN22_metadata_date");
+
+// 定义要处理的站点数字范围（包含起始和结束）
+var start = 1;  // 修改起始数字
+var end = 1;   // 修改结束数字
+
+// 生成站点名称列表
+var stations = ee.List.sequence(start, end).map(function(n) {
+  return ee.String('C').cat(ee.Number(n).format('%d'));
+});
+
+// 加载子流域数据
+var basins = ee.FeatureCollection("WWF/HydroATLAS/v1/Basins/level12");
+
+/* 定义处理单个站点的函数 */
+var processStation = function(stationName) {
+  // 筛选目标站点
+  var station = table.filter(ee.Filter.eq('Station', stationName));
+  
+  // 检查站点是否存在
+  var stationSize = station.size();
+  var stationExists = stationSize.gt(0);
+  
+  return ee.Algorithms.If({
+    condition: stationExists,
+    trueCase: (function() {
+      // 提取站点基础信息
+      var stationInfo = station.map(function(feature) {
+        return ee.Feature(null).copyProperties(feature, ['Station', 'Latitude', 'Longitude', 'Date']);
+      });
+      
+      var firstFeature = stationInfo.first();
+      var lat = firstFeature.get('Latitude');
+      var lon = firstFeature.get('Longitude');
+      var point = ee.Geometry.Point([lon, lat]);
+
+      // 获取子流域信息
+      var basin = basins.filterBounds(point).first();
+      var basinGeometry = basin.geometry();
+
+      /***** 导出流域属性 *****/
+      var basinAttributes = ee.Feature(null, {
+        'Station': stationName,
+        'Latitude': lat,
+        'Longitude': lon,
+        'ClayFraction': basin.get('cly_pc_uav'),
+        'SiltFraction': basin.get('slt_pc_uav'),
+        'SandFraction': basin.get('snd_pc_uav'),
+        'SoilOrganicCarbon': basin.get('soc_th_uav'),
+        'KarstAreaExtent': basin.get("kar_pc_use"),
+        'Elevation': basin.get("ele_mt_uav"),
+        'SoilErosion': basin.get("ero_kh_uav"),
+        'LithologicalClasses': basin.get("lit_cl_smj"),
+        'TerrainSlope': basin.get("slp_dg_uav")
+      });
+
+      Export.table.toDrive({
+        collection: ee.FeatureCollection([basinAttributes]),
+        description: 'Basin_' + stationName,
+        fileFormat: 'CSV',
+        selectors: ['Station','Latitude','Longitude','ClayFraction','SiltFraction',
+                  'SandFraction','SoilOrganicCarbon','KarstAreaExtent','Elevation',
+                  'SoilErosion','LithologicalClasses','TerrainSlop']
+      });
+
+      /***** 处理气象数据 *****/
+      var dates = stationInfo.aggregate_array('Date');
+      var ecmwf = ee.ImageCollection("ECMWF/ERA5_LAND/DAILY_AGGR")
+        .filterBounds(basinGeometry)
+        .select(['temperature_2m','u_component_of_wind_10m','v_component_of_wind_10m',
+                'surface_pressure','total_precipitation_sum','runoff_sum',
+                'temperature_2m_min','temperature_2m_max','surface_solar_radiation_downwards_sum']);
+
+      var extractVariables = function(date) {
+        var dailyData = ecmwf.filterDate(ee.Date(date), ee.Date(date).advance(1, 'day')).first();
+        var era5Data = dailyData.reduceRegion(ee.Reducer.mean(), basinGeometry, 11132);
+        
+        // 计算累积变量
+        var calcCumulative = function(days, variable) {
+          return ecmwf.filterDate(ee.Date(date).advance(-days, 'day'), ee.Date(date))
+                    .select(variable).sum().reduceRegion(ee.Reducer.mean(), basinGeometry, 11132).get(variable);
+        };
+
+        return ee.Feature(null, {
+          'Date': ee.Date(date).format('YYYY-MM-dd'),
+          'Station': stationName,
+          'Temperature': era5Data.get('temperature_2m'),
+          'U_Wind': era5Data.get('u_component_of_wind_10m'),
+          'V_Wind': era5Data.get('v_component_of_wind_10m'),
+          'Pressure': era5Data.get('surface_pressure'),
+          'Precipitation': era5Data.get('total_precipitation_sum'),
+          'Runoff': era5Data.get('runoff_sum'),
+          'T_Min': era5Data.get('temperature_2m_min'),
+          'T_Max': era5Data.get('temperature_2m_max'),
+          'Solar_Radiation': era5Data.get('surface_solar_radiation_downwards_sum'),
+          'P_30d': calcCumulative(30, 'total_precipitation_sum'),
+          'P_60d': calcCumulative(60, 'total_precipitation_sum'),
+          'P_90d': calcCumulative(90, 'total_precipitation_sum'),
+          "T_30d":calcCumulative(30, 'temperature_2m'),
+          "T_60d":calcCumulative(60, 'temperature_2m'),
+          "T_90d":calcCumulative(90, 'temperature_2m')
+        });
+      };
+
+      Export.table.toDrive({
+        collection: ee.FeatureCollection(dates.map(extractVariables)),
+        description: 'ERA5_' + stationName,
+        fileFormat: 'CSV',
+        selectors: ['Date','Station','Temperature','U_Wind','V_Wind','Pressure','Precipitation','Runoff',
+        'T_Min', 'T_Max', 'Solar_Radiation','P_30d','P_60d','P_90d',"T_30d","T_60d","T_15d","T_90d"]
+      });
+
+      /***** 处理土地覆盖数据 *****/
+      var modisLC = ee.ImageCollection("MODIS/061/MCD12Q1").select('LC_Type1');
+      var lcData = ee.FeatureCollection(ee.List.sequence(2001, 2023).map(function(year) {
+        var img = modisLC.filterDate(ee.Date.fromYMD(year, 1, 1), ee.Date.fromYMD(year, 12, 31)).first();
+        var hist = img.reduceRegion(ee.Reducer.frequencyHistogram(), basinGeometry, 500);
+        return ee.Feature(null, {
+          'Year': ee.Number(year),
+          'Station': stationName,
+          'LandCoverHistogram': hist.get('LC_Type1')
+        });
+      }));
+
+      Export.table.toDrive({
+        collection: lcData,
+        description: 'LandCover_' + stationName,
+        fileFormat: 'CSV',
+        selectors: ['Year','Station','LandCoverHistogram']
+      });
+
+      /***** 处理人口密度数据 *****/
+      var popDensity = ee.ImageCollection("CIESIN/GPWv411/GPW_UNWPP-Adjusted_Population_Density");
+      var popData = ee.FeatureCollection(ee.List([2000,2005,2010,2015,2020]).map(function(year) {
+        var img = popDensity.filterDate(ee.Date.fromYMD(year, 1, 1), ee.Date.fromYMD(year, 12, 31)).first();
+        var totalPop = img.reduceRegion(ee.Reducer.sum(), basinGeometry, 1000);
+        return ee.Feature(null, {
+          'Year': ee.Number(year),
+          'Station': stationName,
+          'Population': totalPop.get('unwpp-adjusted_population_density')
+        });
+      }));
+
+      Export.table.toDrive({
+        collection: popData,
+        description: 'Population_' + stationName,
+        fileFormat: 'CSV',
+        selectors: ['Year','Station','Population']
+      });
+
+      return ee.Feature(null); // 返回空特征用于占位
+    })(),
+    falseCase: ee.Feature(null).set('error', ee.String('Station ').cat(stationName).cat(' not found'))
+  });
+};
+
+// 批量生成所有导出任务（注意：最多支持3000个任务）
+stations.evaluate(function(stationList) {
+  stationList.forEach(function(stationName) {
+    processStation(stationName);
+  });
+});
