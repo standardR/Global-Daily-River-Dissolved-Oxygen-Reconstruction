@@ -1,4 +1,5 @@
 # Coupling Deep Learning and Google Earth Engine for Global Daily River Dissolved Oxygen Reconstruction
+![Model Architecture](image/img.png)
 
 This project presents a transformer-based deep learning framework to reconstruct daily dissolved oxygen (DO) concentrations in rivers at a global scale by integrating hydrometeorological datasets and watershed attributes. The study addresses the challenges of spatiotemporal gaps in water quality records and provides new insights into the key drivers of DO dynamics worldwide.
 
