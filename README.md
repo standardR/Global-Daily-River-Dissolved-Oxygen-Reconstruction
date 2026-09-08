@@ -54,7 +54,7 @@ This project presents a transformer-based deep learning framework to reconstruct
 
 ## Contact
 
-Kun Shan
+Kun Shan <br>
 Chongqing Institute of Green and Intelligent Technology,  
 Chinese Academy of Sciences, Chongqing, 400714, China  
 E-mail: shankun@cigit.ac.cn
